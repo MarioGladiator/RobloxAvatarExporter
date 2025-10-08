@@ -1,228 +1,108 @@
 #!/usr/bin/env python3
 """
-Simple ASCII FBX to Binary FBX Converter
-Based on the FBX 7.x binary specification
+ASCII FBX to Binary FBX Converter
+Uses Autodesk FBX Converter CLI tool
 
-This converter takes an ASCII FBX file and converts it to binary format
-that Blender can import.
+This script wraps the Autodesk FBX Converter to convert ASCII FBX files
+to binary format that Blender can import.
+
+Requirements:
+- FBX Converter must be installed and in PATH
+- Download from: https://www.autodesk.com/developer-network/platform-technologies/fbx-converter-archives
 """
 
-import struct
-import zlib
-import re
+import subprocess
+import shutil
+import sys
 from pathlib import Path
 
 
-# FBX Binary constants
-FBX_HEADER = b'Kaydara FBX Binary  \x00\x1a\x00'
-FBX_VERSION = 7400
-FBX_FOOTER_CODE = [0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e, 
-                   0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b]
-
-
-class FBXNode:
-    def __init__(self, name=''):
-        self.name = name
-        self.properties = []
-        self.children = []
-
-
-def parse_ascii_fbx(content):
-    """Parse ASCII FBX into a node tree."""
-    lines = content.split('\n')
-    root = FBXNode('__ROOT__')
-    stack = [root]
+def find_fbx_converter():
+    """Find FBX Converter executable."""
+    # Try common executable names
+    converter_names = [
+        'FbxConverter',
+        'FbxConverter.exe',
+        'fbxconverter',
+        'fbxconverter.exe'
+    ]
     
-    for line in lines:
-        stripped = line.strip()
-        
-        # Skip comments and empty lines
-        if not stripped or stripped.startswith(';'):
-            continue
-        
-        # Handle closing brace
-        if stripped == '}':
-            if len(stack) > 1:
-                stack.pop()
-            continue
-        
-        # Check for node definition (contains colon)
-        if ':' in stripped and '{' not in stripped:
-            # Parse node definition
-            parts = stripped.split(':', 1)
-            node_def = parts[0].strip()
-            
-            # Extract node name and properties
-            if ',' in node_def:
-                # Example: Model: 12345, "Model::Name", "Mesh"
-                items = [x.strip() for x in node_def.split(',')]
-                node_name = items[0]
-                properties = items[1:] if len(items) > 1 else []
-            else:
-                node_name = node_def
-                properties = []
-            
-            node = FBXNode(node_name)
-            
-            # Parse properties - handle quotes and numbers
-            for prop in properties:
-                prop = prop.strip()
-                if prop.startswith('"') and prop.endswith('"'):
-                    # String property
-                    node.properties.append(prop[1:-1])
-                elif '.' in prop or 'e' in prop.lower():
-                    # Float
-                    try:
-                        node.properties.append(float(prop))
-                    except:
-                        node.properties.append(prop)
-                else:
-                    # Integer
-                    try:
-                        node.properties.append(int(prop))
-                    except:
-                        node.properties.append(prop)
-            
-            stack[-1].children.append(node)
-            
-            # Check if this node has children (has opening brace on same line or next)
-            if '{' in stripped:
-                stack.append(node)
-        elif '{' in stripped:
-            # Standalone opening brace - previous node gets children
-            if stack[-1].children:
-                stack.append(stack[-1].children[-1])
+    for name in converter_names:
+        if shutil.which(name):
+            return name
     
-    return root
+    return None
 
 
-def encode_property(value):
-    """Encode a property value to FBX binary format."""
-    if isinstance(value, str):
-        # String: type 'S' + length (4 bytes) + UTF-8 bytes
-        encoded = value.encode('utf-8')
-        return b'S' + struct.pack('<I', len(encoded)) + encoded
-    elif isinstance(value, bool):
-        # Boolean: type 'C' + 1 byte
-        return b'C' + struct.pack('<b', 1 if value else 0)
-    elif isinstance(value, int):
-        # Integer: choose appropriate size
-        if -128 <= value <= 127:
-            return b'C' + struct.pack('<b', value)
-        elif -32768 <= value <= 32767:
-            return b'Y' + struct.pack('<h', value)
-        elif -2147483648 <= value <= 2147483647:
-            return b'I' + struct.pack('<i', value)
+def convert_with_fbx_converter(input_file, output_file, converter_exe):
+    """Convert ASCII FBX to Binary using Autodesk FBX Converter.
+    
+    Command line reference:
+    https://download.autodesk.com/us/fbx/2013/FBXconverter/index.html
+    """
+    try:
+        # FBX Converter command format:
+        # FbxConverter <input_file> <output_file> /sffBIN /dffBIN /l
+        # /sffBIN - source file format binary (actually we want ASCII to binary)
+        # /dffBIN - destination file format binary
+        # /l - verbose logging
+        
+        cmd = [
+            converter_exe,
+            str(input_file),
+            str(output_file),
+            '/dffBIN',  # Destination format: binary
+            '/v'  # Verbose
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            return True, "Conversion successful"
         else:
-            return b'L' + struct.pack('<q', value)
-    elif isinstance(value, float):
-        # Float/Double: use double for precision
-        return b'D' + struct.pack('<d', value)
-    elif isinstance(value, (list, tuple)):
-        # Array
-        if not value:
-            return b'i' + struct.pack('<III', 0, 0, 0)
-        
-        # Determine array type
-        first_type = type(value[0])
-        if first_type == int:
-            arr_type = b'i'
-            arr_data = b''.join(struct.pack('<i', int(v)) for v in value)
-        elif first_type == float:
-            arr_type = b'd'
-            arr_data = b''.join(struct.pack('<d', float(v)) for v in value)
-        elif first_type == bool:
-            arr_type = b'b'
-            arr_data = b''.join(struct.pack('<?', v) for v in value)
-        else:
-            # Fallback
-            arr_type = b'i'
-            arr_data = b''.join(struct.pack('<i', 0) for _ in value)
-        
-        # Try compression
-        encoding = 0
-        data = arr_data
-        if len(arr_data) > 128:
-            compressed = zlib.compress(arr_data)
-            if len(compressed) < len(arr_data):
-                data = compressed
-                encoding = 1
-        
-        header = struct.pack('<III', len(value), encoding, len(data))
-        return arr_type + header + data
-    else:
-        # Unknown type - encode as string
-        encoded = str(value).encode('utf-8')
-        return b'S' + struct.pack('<I', len(encoded)) + encoded
+            return False, f"FBX Converter failed: {result.stderr or result.stdout}"
+            
+    except subprocess.TimeoutExpired:
+        return False, "Conversion timed out"
+    except Exception as e:
+        return False, f"Error running FBX Converter: {e}"
 
 
-def write_fbx_node(fp, node):
-    """Write a single FBX node in binary format."""
-    # Encode node name
-    name_bytes = node.name.encode('utf-8')
-    
-    # Encode properties
-    prop_data = b''
-    for prop in node.properties:
-        prop_data += encode_property(prop)
-    
-    # Prepare node record
-    num_properties = len(node.properties)
-    property_list_len = len(prop_data)
-    name_len = len(name_bytes)
-    
-    # Placeholder for end offset
-    end_offset_pos = fp.tell()
-    fp.write(struct.pack('<I', 0))
-    
-    # Write node header
-    fp.write(struct.pack('<I', num_properties))
-    fp.write(struct.pack('<I', property_list_len))
-    fp.write(struct.pack('<B', name_len))
-    fp.write(name_bytes)
-    fp.write(prop_data)
-    
-    # Write children
-    if node.children:
-        for child in node.children:
-            write_fbx_node(fp, child)
-        # Null record to mark end of children
-        fp.write(b'\x00' * 13)
-    
-    # Update end offset
-    end_pos = fp.tell()
-    fp.seek(end_offset_pos)
-    fp.write(struct.pack('<I', end_pos))
-    fp.seek(end_pos)
+def check_if_binary_fbx(file_path):
+    """Check if a file is already binary FBX."""
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(23)
+            return header == b'Kaydara FBX Binary  \x00\x1a\x00'
+    except:
+        return False
 
 
 def convert_ascii_to_binary(ascii_path, binary_path):
-    """Convert ASCII FBX to Binary FBX."""
-    # Read ASCII file
-    with open(ascii_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    """Convert ASCII FBX to Binary FBX using Autodesk FBX Converter."""
+    # Find FBX Converter
+    converter = find_fbx_converter()
     
-    # Parse ASCII FBX
-    root = parse_ascii_fbx(content)
+    if not converter:
+        raise FileNotFoundError(
+            "FBX Converter not found in PATH!\n\n"
+            "Please install Autodesk FBX Converter and add it to your PATH.\n"
+            "Download from: https://www.autodesk.com/developer-network/platform-technologies/fbx-converter-archives\n\n"
+            "Or add it manually to your PATH environment variable."
+        )
     
-    # Write binary FBX
-    with open(binary_path, 'wb') as fp:
-        # Write header
-        fp.write(FBX_HEADER)
-        fp.write(struct.pack('<I', FBX_VERSION))
-        
-        # Write nodes
-        for child in root.children:
-            write_fbx_node(fp, child)
-        
-        # Write final null record
-        fp.write(b'\x00' * 13)
-        
-        # Write footer
-        fp.write(bytes(FBX_FOOTER_CODE))
-        fp.write(b'\x00' * 4)
-        fp.write(struct.pack('<I', FBX_VERSION))
-        fp.write(b'\x00' * 120)
+    # Convert using FBX Converter
+    success, message = convert_with_fbx_converter(ascii_path, binary_path, converter)
+    
+    if not success:
+        raise RuntimeError(f"FBX conversion failed: {message}")
+    
+    return True
 
 
 def convert_all_fbx_in_directory(directory):
@@ -230,20 +110,26 @@ def convert_all_fbx_in_directory(directory):
     directory = Path(directory)
     converted = []
     
+    # Check if FBX Converter is available first
+    converter = find_fbx_converter()
+    if not converter:
+        print("ERROR: FBX Converter not found in PATH!")
+        print("\nPlease install Autodesk FBX Converter and add it to your PATH.")
+        print("Download from: https://www.autodesk.com/developer-network/platform-technologies/fbx-converter-archives")
+        return converted
+    
     for fbx_file in directory.rglob('*.fbx'):
         # Check if it's ASCII FBX
-        with open(fbx_file, 'rb') as f:
-            header = f.read(25)
-            if not header.startswith(FBX_HEADER):
-                # It's ASCII, convert it
-                binary_file = fbx_file.with_name(fbx_file.stem + '_binary.fbx')
-                print(f"Converting: {fbx_file.name}")
-                try:
-                    convert_ascii_to_binary(str(fbx_file), str(binary_file))
-                    converted.append(binary_file)
-                    print(f"  -> Created: {binary_file.name}")
-                except Exception as e:
-                    print(f"  -> Error: {e}")
+        if not check_if_binary_fbx(fbx_file):
+            # It's ASCII, convert it
+            binary_file = fbx_file.with_name(fbx_file.stem + '_binary.fbx')
+            print(f"Converting: {fbx_file.name}")
+            try:
+                convert_ascii_to_binary(str(fbx_file), str(binary_file))
+                converted.append(binary_file)
+                print(f"  -> Created: {binary_file.name}")
+            except Exception as e:
+                print(f"  -> Error: {e}")
     
     return converted
 
