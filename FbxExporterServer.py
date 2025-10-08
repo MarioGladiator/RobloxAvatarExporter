@@ -1058,13 +1058,24 @@ def export_roblox_model(model_desc) -> str:
 
     text = doc.finalize()
 
-    logger.message("Save FBX '" + file_name + "'")
+    logger.message("Save ASCII FBX '" + file_name + "'")
     ensure_path_exist(file_name)
     file_handle = open(file_name, 'w+')
     file_handle.write(text)
     file_handle.close()
 
-    return "Saved file:" + file_name
+    # Also create binary FBX for Blender compatibility
+    binary_file_name = file_name.replace('.fbx', '_binary.fbx')
+    logger.message("Converting to Binary FBX '" + binary_file_name + "'")
+    try:
+        import ascii_to_binary_fbx
+        ascii_to_binary_fbx.convert_ascii_to_binary(file_name, binary_file_name)
+        logger.message("Binary FBX created successfully")
+        return "Saved files:\n  ASCII: " + file_name + "\n  Binary: " + binary_file_name
+    except Exception as e:
+        logger.warn("Binary conversion failed: " + str(e))
+        logger.warn("ASCII FBX saved, but you'll need to convert it manually for Blender")
+        return "Saved ASCII file:" + file_name + "\n(Binary conversion failed, see console for details)"
 
 
 class ForgeHTTPArtServerRequestHandler(BaseHTTPRequestHandler):
