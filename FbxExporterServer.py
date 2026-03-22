@@ -37,6 +37,13 @@ import urllib.request
 import urllib.error
 
 
+ASSET_DELIVERY_API_BASE_URL = os.environ.get(
+    "ROBLOX_ASSET_DELIVERY_API_BASE_URL",
+    "https://apis.roblox.com/asset-delivery-api/v1/assetId/"
+)
+ASSET_DELIVERY_API_KEY = os.environ.get("ROBLOX_ASSET_DELIVERY_API_KEY", "").strip()
+
+
 def ensure_path_exist(file_path: str) -> str:
     dir_name = os.path.dirname(file_path)
     if not os.path.isdir(dir_name):
@@ -137,6 +144,40 @@ def fetch_local_asset(file_path: str):
             "payload": data}, None
 
 
+def fetch_asset_payload(url: str):
+    request = urllib.request.Request(url)
+    request.add_header('Accept-Encoding', 'gzip')
+    request.add_header('User-Agent', 'RobloxStudio/WinInet')
+
+    fetched_bytes = 0
+    response = urllib.request.urlopen(request)
+    if response.info().get('Content-Encoding') == 'gzip':
+        compressed_data = response.read()
+        fetched_bytes = len(compressed_data)
+        data = gzip.decompress(compressed_data)
+    else:
+        data = response.read()
+        fetched_bytes = len(data)
+
+    html_timestamp = response.info().get('Last-Modified')
+    timestamp = int(time.time())
+    if html_timestamp is not None:
+        parsed_time = email_utils.parsedate(html_timestamp)
+        if parsed_time is not None:
+            timestamp = int(time.mktime(parsed_time))
+
+    h256 = hashlib.sha256()
+    h256.update(data)
+
+    return {"hash": h256.hexdigest(),
+            "cdn_url": str(response.geturl()),
+            "ts": timestamp,
+            "code": response.getcode(),
+            "fetched_bytes": fetched_bytes,
+            "payload_bytes": len(data),
+            "payload": data}, None
+
+
 def fetch_asset(url: str) -> dict or None:
     if not url:
         return None, "Invalid URL"
@@ -145,7 +186,7 @@ def fetch_asset(url: str) -> dict or None:
         url = "./built-in/" + url[11:]
         return fetch_local_asset(url)
 
-    asset_fetch_endpoint = 'https://assetdelivery.roblox.com/v1/asset/?id='
+    asset_fetch_endpoint = ASSET_DELIVERY_API_BASE_URL.rstrip("/") + "/"
     if url.startswith('rbxassetid://'):
         url = asset_fetch_endpoint + url[13:]
     elif url.startswith('https://www.roblox.com/asset/?id='):
@@ -157,37 +198,34 @@ def fetch_asset(url: str) -> dict or None:
 
     try:
         url = url.replace(" ", "")
+        if not url.startswith(asset_fetch_endpoint):
+            return fetch_asset_payload(url)
+
         request = urllib.request.Request(url)
         request.add_header('Roblox-Place-Id', '0')
         request.add_header('Accept-Encoding', 'gzip')
         request.add_header('User-Agent', 'RobloxStudio/WinInet')
+        request.add_header('Accept', 'application/json')
+        if ASSET_DELIVERY_API_KEY:
+            request.add_header('x-api-key', ASSET_DELIVERY_API_KEY)
 
         # noinspection PyUnusedLocal
         fetched_bytes = 0
         response = urllib.request.urlopen(request)
+        asset_meta_payload = response.read()
         if response.info().get('Content-Encoding') == 'gzip':
-            compressed_data = response.read()
-            fetched_bytes = len(compressed_data)
-            data = gzip.decompress(compressed_data)
-        else:
-            data = response.read()
-            fetched_bytes = len(data)
+            asset_meta_payload = gzip.decompress(asset_meta_payload)
 
-        cdn_url = str(response.geturl())
-
-        h256 = hashlib.sha256()
-        h256.update(data)
-
-        html_timestamp = response.info().get('Last-Modified')
-        timestamp = int(time.mktime(email_utils.parsedate(html_timestamp)))
-
-        return {"hash": h256.hexdigest(),
-                "cdn_url": cdn_url,
-                "ts": timestamp,
-                "code": response.getcode(),
-                "fetched_bytes": fetched_bytes,
-                "payload_bytes": len(data),
-                "payload": data}, None
+        asset_meta = json.loads(asset_meta_payload.decode('utf-8'))
+        cdn_url = str(asset_meta.get("location", "")).strip()
+        if not cdn_url:
+            errors = asset_meta.get("errors", [])
+            return None, "Asset delivery did not return a location. Errors: " + str(errors)
+        result, err = fetch_asset_payload(cdn_url)
+        if result is None:
+            return None, err
+        result["cdn_url"] = cdn_url
+        return result, None
 
     except urllib.error.HTTPError as ex:
         logger.warn("Can't fetch asset '" + url + "'")
@@ -444,6 +482,19 @@ class Attachment(Instance):
         return
 
 
+class WrapTarget(Instance):
+    def __init__(self):
+        super().__init__()
+        self.cage_mesh_id = ""
+        self.cage_origin = CFrame()
+        self.import_origin = CFrame()
+        self.mesh_blob = None
+
+    def resolve(self, id_to_object: dict):
+        super().resolve(id_to_object)
+        return
+
+
 class Accessory(Instance):
     def __init__(self):
         super().__init__()
@@ -539,6 +590,11 @@ def parse_model_desc(model_desc) -> Instance or None:
         elif obj_class == "Attachment":
             obj = Attachment()
             obj.cframe = get_cframe(dm_object.get('CFrame', CFrame()))
+        elif obj_class == "WrapTarget":
+            obj = WrapTarget()
+            obj.cage_mesh_id = dm_object.get('CageMeshId', '')
+            obj.cage_origin = get_cframe(dm_object.get('CageOrigin', CFrame()))
+            obj.import_origin = get_cframe(dm_object.get('ImportOrigin', CFrame()))
         elif obj_class == "WeldConstraint":
             obj = Weld()
             obj.part0 = dm_object.get('Part0', -1)
@@ -597,6 +653,14 @@ def parse_model_desc(model_desc) -> Instance or None:
                 data_cache[obj.texture_id] = obj.texture_blob
             else:
                 logger.message("    Cached texture: " + obj.texture_id)
+        elif isinstance(obj, WrapTarget) and obj.cage_mesh_id:
+            obj.mesh_blob = data_cache.get(obj.cage_mesh_id, None)
+            if obj.mesh_blob is None:
+                logger.message("    Fetch cage: " + obj.cage_mesh_id)
+                obj.mesh_blob, err = fetch_asset(obj.cage_mesh_id)
+                data_cache[obj.cage_mesh_id] = obj.mesh_blob
+            else:
+                logger.message("    Cached cage: " + obj.cage_mesh_id)
 
     return root
 
@@ -769,6 +833,43 @@ def append_to_fbx(doc, node, fbx_parent_id: int, desc: SceneDescription):
         append_to_fbx(doc, child, fbx_id, desc)
 
     return
+
+
+def clone_mesh_part(node: MeshPart, name_suffix: str = "") -> MeshPart:
+    clone = MeshPart()
+    clone.name = node.name + name_suffix
+    clone.parent = node.parent
+    clone.children = list()
+    clone.mesh_id = node.mesh_id
+    clone.mesh_type = node.mesh_type
+    clone.texture_id = node.texture_id
+    clone.cframe = node.cframe
+    clone.texture_blob = node.texture_blob
+    clone.mesh_blob = node.mesh_blob
+    clone.offset_x = node.offset_x
+    clone.offset_y = node.offset_y
+    clone.offset_z = node.offset_z
+    clone.scale_x = node.scale_x
+    clone.scale_y = node.scale_y
+    clone.scale_z = node.scale_z
+    clone.size_x = node.size_x
+    clone.size_y = node.size_y
+    clone.size_z = node.size_z
+    return clone
+
+
+def create_cage_mesh_part(render_node: MeshPart, wrap_target: WrapTarget) -> MeshPart or None:
+    if wrap_target.mesh_blob is None:
+        return None
+
+    cage = clone_mesh_part(render_node)
+    cage.name = render_node.name[:-4] + "_OuterCage" if render_node.name.endswith("_Geo") else render_node.name + "_OuterCage"
+    cage.mesh_id = wrap_target.cage_mesh_id
+    cage.mesh_blob = wrap_target.mesh_blob
+    cage.texture_id = ""
+    cage.texture_blob = None
+    cage.cframe = cframe_multiply(render_node.cframe, wrap_target.cage_origin)
+    return cage
 
 
 def _get_linearized_tree_recursive(res: list, node: Instance):
@@ -960,6 +1061,7 @@ def export_roblox_model(model_desc) -> str:
     # Step 7. Attach mesh part to corresponding bones
     # a) built attachments list
     geom_to_attachments = dict()
+    geom_to_cage = dict()
     for node in nodes:
         if isinstance(node, Attachment) and not node.name.endswith("RigAttachment"):
             if node.name.endswith("Attachment"):
@@ -972,6 +1074,9 @@ def export_roblox_model(model_desc) -> str:
                 geom_to_attachments[parent_geo_name] = geo_attachments
 
             geo_attachments.append(node)
+        elif isinstance(node, WrapTarget) and isinstance(node.parent, MeshPart):
+            parent_geo_name = node.parent.name + "_Geo"
+            geom_to_cage[parent_geo_name] = node
 
     # b) destroy existing hierarchy (unlink)
     for node in nodes:
@@ -986,6 +1091,14 @@ def export_roblox_model(model_desc) -> str:
                 node.cframe = cframe_multiply(cframe_inverse(bone.cframe), node.cframe)
                 node.parent = bone
                 bone.children.append(node)
+
+                if isinstance(node, MeshPart):
+                    wrap_target = geom_to_cage.get(part_name, None)
+                    if wrap_target is not None:
+                        cage_node = create_cage_mesh_part(node, wrap_target)
+                        if cage_node is not None:
+                            cage_node.parent = bone
+                            bone.children.append(cage_node)
 
         geo_attachments = geom_to_attachments.get(part_name, None)
         if geo_attachments:
@@ -1186,5 +1299,5 @@ def main():
     logger.message('Press Ctrl+C to exit')
     httpd.serve_forever()
 
-
-main()
+if __name__ == '__main__':
+    main()
