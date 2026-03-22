@@ -2,6 +2,8 @@
 
 Standalone Avatar Exporter + Batch Exporter
 
+Exports Roblox avatars to FBX with R15 bone hierarchy, rigid attachment markers, textures, and bundle `WrapTarget` body cages so the exported FBX stays compatible with Roblox avatar auto-setup/import workflows.
+
 ## Prerequisites
 
 ### Required
@@ -22,6 +24,7 @@ Standalone Avatar Exporter + Batch Exporter
    https://www.roblox.com/library/6506050633/AvatarExporter  
    ![alt tag](https://raw.githubusercontent.com/SergeyMakeev/RobloxAvatarExporter/master/pics/plugin.png)
 4. Run `python FbxExporterServer.py`
+   - To resolve `rbxassetid://` meshes, textures, and bundle cage assets through Roblox's current Open Cloud asset delivery API, set `ROBLOX_ASSET_DELIVERY_API_KEY` in the environment before starting the server.
 5. Open Roblox Studio and select an avatar you need to export  
    ![alt tag](https://raw.githubusercontent.com/SergeyMakeev/RobloxAvatarExporter/master/pics/select_avatar.png)
 6. Click `Avatar Exporter` button
@@ -36,6 +39,7 @@ Standalone Avatar Exporter + Batch Exporter
    https://www.roblox.com/library/6506050633/AvatarExporter
 3. Open `bundles.txt` (or `accessories.txt`) and type a list of avatar bundles you want to export
 4. Run `python FbxExporterServer.py`
+   - Batch bundle exports also use `ROBLOX_ASSET_DELIVERY_API_KEY` for Roblox's Open Cloud asset delivery endpoint when resolving asset IDs.
 5. Open Roblox Studio and create an empty base plate
 6. Click `Batch Export` button
 7. Find the resulting avatar bundles exported to `.FBX` files in the `Avatars` folder
@@ -65,6 +69,17 @@ python ascii_to_binary_fbx.py Avatars/
 **Note:** Autodesk FBX Converter must be installed and in your PATH for automatic conversion to work.
 
 ## Troubleshooting
+
+### Asset delivery / missing meshes or textures
+
+If `rbxassetid://` content fails to resolve, make sure you started the exporter with a valid Roblox Open Cloud API key:
+
+```bash
+export ROBLOX_ASSET_DELIVERY_API_KEY="your-api-key"
+python FbxExporterServer.py
+```
+
+The exporter now uses `https://apis.roblox.com/asset-delivery-api/v1/assetId/{assetId}` and then downloads the temporary CDN URL returned by that API.
 
 ### "FBX Converter not found in PATH"
 

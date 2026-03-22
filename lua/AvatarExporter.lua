@@ -94,6 +94,7 @@ local function getAvatarDescriptionRecursive(object: Instance, parent: Instance,
 		object:IsA("Model") or
 		object:IsA("Bone") or
 		object:IsA("Attachment") or
+		object:IsA("WrapTarget") or
 		object:IsA("WeldConstraint") or
 		object:IsA("Accessory") or
 		object:IsA("Motor6D") then
@@ -184,6 +185,10 @@ local function getAvatarDescriptionRecursive(object: Instance, parent: Instance,
 				dmObject["AttachPoint"] = getCFrame(object.AttachmentPoint)
 			elseif object:IsA("Attachment") then
 				dmObject["CFrame"] = getCFrame(object.CFrame)
+			elseif object:IsA("WrapTarget") then
+				dmObject["CageMeshId"] = object.CageMeshId
+				dmObject["CageOrigin"] = getCFrame(object.CageOrigin)
+				dmObject["ImportOrigin"] = getCFrame(object.ImportOrigin)
 			elseif object:IsA("WeldConstraint") then
 				dmObject["Part0"] = getObjectGuid(object.Part0)
 				dmObject["Part1"] = getObjectGuid(object.Part1)				
@@ -451,4 +456,3 @@ local batchExportBtn = g_Toolbar:CreateButton("Batch Export", "Batch Export", "r
 batchExportBtn.Click:connect(function()
 	batchExport()	
 end)
-
